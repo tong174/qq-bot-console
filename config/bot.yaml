@@ -1,0 +1,35 @@
+napcat:
+  dir: ''
+  mode: server
+  ws_url: ws://127.0.0.1:3001
+  access_token: ''
+  auto_configure: true
+llm:
+  base_url: http://127.0.0.1:8788/v1
+  model: deepseek-v4.1-flash
+  fallbacks:
+  - glm-5.3
+  - gpt-5.6-sol
+  temperature: 0.9
+  max_tokens: 300
+  timeout: 60
+  proxy: ''
+  persona: girlfriend
+behavior:
+  group_reply_mode: at
+  trigger_words:
+  - 机器人
+  private_enabled: true
+  max_history: 20
+  max_context_chars: 4000
+  cooldown_seconds: 1.5
+  admins: []
+  group_blacklist: []
+  sticker_dir: stickers
+  use_memes: true
+  memes_file: memes.yaml
+  memory_enabled: true
+  memory_dir: memory
+  vision_enabled: true
+  web_enabled: true
+  web_max_results: 4

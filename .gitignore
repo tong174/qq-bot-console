@@ -1,0 +1,31 @@
+# 分享 / 打包时忽略这些文件
+config/secrets.yaml
+config/local.yaml
+
+# 运行数据
+logs/
+runtime/
+data/memory/
+data/.windowprofile/
+.windowprofile/
+*.log
+QQBot_boot.log
+.instance.lock
+window.pid
+config/.update-check.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 系统
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# 第三方安装的组件 (由 setup 脚本自动下载)
+NapCat.Framework/
+dist/
+build/
+*.spec
