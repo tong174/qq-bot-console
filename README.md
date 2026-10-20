@@ -2,6 +2,9 @@
 
 一个开箱即用的 QQ 机器人。双击启动，浏览器界面管理一切。
 
+**项目地址**：<https://github.com/tong174/qq-bot-console>
+**最新发布**：<https://github.com/tong174/qq-bot-console/releases/tag/v1.3.0>
+
 ## 快速开始
 
 **双击 `dist\QQBot\QQBot.exe`**（或 `dist\启动QQ机器人.bat`）
