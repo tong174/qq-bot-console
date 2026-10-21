@@ -29,3 +29,9 @@ NapCat.Framework/
 dist/
 build/
 *.spec
+
+# RSS 推送状态
+config/.rss-state.json
+
+# 群消息记录（运行时数据）
+config/memory/

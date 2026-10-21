@@ -39,6 +39,9 @@ from memory import (
 )
 
 import webskill
+import groupmem
+import rss as rssmod
+import proactive
 
 logging.basicConfig(
     level=logging.INFO,
@@ -62,6 +65,21 @@ def _resolve(sub: str) -> Path:
         if p.exists():
             return p
     return CONFIG_DIR / sub
+
+
+def _data_dir(sub: str) -> Path:
+    """运行期数据目录（记忆/群记录），一律挂在 data/ 下。
+
+    和 _resolve 的区别：这里不看 config/，避免把运行时数据写进配置目录。
+    """
+    p = Path(sub)
+    if p.is_absolute():
+        return p
+    # 已经带 data/ 前缀的就直接用
+    d = DATA_DIR / p
+    if p.exists() and p.is_dir():
+        return p
+    return d
 
 
 # --------------------------------------------------------------------------- #
@@ -113,6 +131,20 @@ class Config:
     # 热梗库
     memes_file: str = "memes.yaml"
     use_memes: bool = True
+    # ---- 群记忆 ----
+    group_memory_enabled: bool = True
+    group_memory_dir: str = "memory/groups"
+    group_memory_keep: int = 4000
+    group_summary_window: int = 3600
+    # ---- RSS 订阅 ----
+    rss_enabled: bool = True
+    rss_file: str = "rss.yaml"
+    # ---- 私聊主动发消息 ----
+    proactive_enabled: bool = True
+    proactive_min_gap_min: int = 90
+    proactive_max_per_day: int = 4
+    proactive_wake_from: int = 9
+    proactive_wake_to: int = 23
 
 
 STICKER_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
@@ -256,6 +288,20 @@ def load_config() -> Config:
     c.web_max_results = int(b.get("web_max_results", 4))
     c.memes_file = str(b.get("memes_file", "memes.yaml") or "memes.yaml")
     c.use_memes = bool(b.get("use_memes", True))
+    # ---- 群记忆 ----
+    c.group_memory_enabled = bool(b.get("group_memory_enabled", True))
+    c.group_memory_dir = str(b.get("group_memory_dir", "memory/groups") or "memory/groups")
+    c.group_memory_keep = int(b.get("group_memory_keep", 4000))
+    c.group_summary_window = int(b.get("group_summary_window", 3600))
+    # ---- RSS ----
+    c.rss_enabled = bool(b.get("rss_enabled", True))
+    c.rss_file = str(b.get("rss_file", "rss.yaml") or "rss.yaml")
+    # ---- 私聊主动消息 ----
+    c.proactive_enabled = bool(b.get("proactive_enabled", True))
+    c.proactive_min_gap_min = int(b.get("proactive_min_gap_min", 90))
+    c.proactive_max_per_day = int(b.get("proactive_max_per_day", 4))
+    c.proactive_wake_from = int(b.get("proactive_wake_from", 9))
+    c.proactive_wake_to = int(b.get("proactive_wake_to", 23))
     return c
 
 
@@ -666,6 +712,18 @@ class Bot:
         else:
             self.memory = None
 
+        # 群消息记忆（记录全部群聊，供总结用）
+        self.group_memory = None
+        if cfg.group_memory_enabled:
+            gdir = _data_dir(cfg.group_memory_dir)
+            self.group_memory = groupmem.GroupMemoryStore(gdir, cfg.group_memory_keep)
+
+        # RSS 订阅
+        self.rss = rssmod.RssWatcher(cfg) if cfg.rss_enabled else None
+
+        # 私聊主动发消息
+        self.proactive = proactive.ProactiveScheduler(self, cfg) if cfg.proactive_enabled else None
+
     # ---------------- 触发判定 ----------------
     def should_reply(self, ev: Dict[str, Any], text: str, is_self: bool) -> bool:
         cfg = self.cfg
@@ -688,8 +746,65 @@ class Bot:
                 return True
         return False
 
+    # ---------------- 群消息记录 ----------------
+    def record_group_msg(self, ev: Dict[str, Any]) -> None:
+        """把群消息记进群记忆（不管要不要回复）。"""
+        if self.group_memory is None:
+            return
+        if ev.get("message_type") != "group":
+            return
+        uid = ev.get("user_id") or 0
+        if uid == ev.get("self_id"):
+            return  # 自己的消息不记
+        gid = ev.get("group_id")
+        if not gid:
+            return
+        sender = ev.get("sender", {}) or {}
+        name = sender.get("card") or sender.get("nickname") or str(uid)
+        msg = ev.get("message")
+        text = extract_text(msg)
+        imgs = extract_images(msg)
+        if not text and not imgs:
+            return
+        try:
+            g = self.group_memory.get(int(gid))
+            g.add(uid=int(uid), name=str(name), text=text,
+                  has_image=bool(imgs), msg_id=ev.get("message_id"))
+            g.save()
+        except Exception:  # noqa: BLE001
+            log.exception("[群记忆] 记录失败")
+
+    # ---------------- 群总结 ----------------
+    async def summarize_group(self, gid: int, window: float) -> str:
+        """总结某群最近 window 秒的消息。"""
+        if self.group_memory is None:
+            return "群记忆功能没开，先在 config/bot.yaml 里打开 group_memory_enabled"
+        g = self.group_memory.get(int(gid))
+        msgs = g.recent(window)
+        if len(msgs) < 3:
+            return f"这段时间（约 {int(window // 60)} 分钟）群里才 {len(msgs)} 条消息，没什么可总结的。"
+        stat = g.stats_text(msgs)
+        rendered = g.render(msgs, max_chars=6000)
+        prompt = groupmem.build_summary_prompt(stat, rendered)
+        try:
+            loop = asyncio.get_running_loop()
+            text = await loop.run_in_executor(
+                None,
+                lambda: self.llm.chat([
+                    {"role": "system", "content": "你是一个会看群聊、会总结的人。说话自然，别像会议纪要。"},
+                    {"role": "user", "content": prompt},
+                ], temperature=0.5),
+            )
+            return text.strip()
+        except LLMError as exc:
+            log.error("总结失败: %s", exc)
+            return "脑子卡住了，总结没出来…"
+
     # ---------------- 主处理 ----------------
     async def handle(self, ev: Dict[str, Any]) -> None:
+        # 先记账：群消息全部入群记忆（不受触发规则影响）
+        self.record_group_msg(ev)
+
         text = extract_text(ev.get("message"))
         images = extract_images(ev.get("message")) if self.cfg.vision_enabled else []
         # 纯图片消息也要处理
@@ -698,6 +813,14 @@ class Bot:
         if not text:
             text = "（他发来一张图片）"
         is_self = ev.get("user_id") == ev.get("self_id")
+
+        # 私聊互动记账（主动发消息要用）
+        if self.proactive is not None and ev.get("message_type") == "private" and not is_self:
+            try:
+                self.proactive.note_incoming(int(ev.get("user_id") or 0))
+            except Exception:  # noqa: BLE001
+                pass
+
         if not self.should_reply(ev, text, is_self):
             return
 
@@ -778,6 +901,26 @@ class Bot:
             except Exception as exc:  # noqa: BLE001
                 log.warning("[联网] 失败: %s", exc)
 
+        # ---- 群聊语境：让他知道这是群、刚才是谁在说话 ----
+        if ev.get("message_type") == "group" and self.group_memory is not None:
+            gid = int(ev.get("group_id") or 0)
+            try:
+                g = self.group_memory.get(gid)
+                recent = g.recent(1200, limit=14)
+                if len(recent) >= 2:
+                    ctx = g.render(recent, max_chars=1600)
+                    sys_prompt += (
+                        "\n\n【这是群聊，不是一对一】\n"
+                        "你能看到群里刚才的对话（下面是最近的消息）：\n" + ctx +
+                        "\n\n注意: 你只需要接住跟你有关、或者你能插上话的部分。"
+                        "不要逐条回应，不要复述这些内容，不要对所有人说话。"
+                    )
+            except Exception:  # noqa: BLE001
+                pass
+            # 群聊时提醒当前说话人是谁
+            if nickname:
+                sys_prompt += f"\n现在跟你说话的人是「{nickname}」。"
+
         # ---- 长期记忆与情绪 ----
         if self.memory and key:
             mem = self.memory.get(key)
@@ -847,6 +990,64 @@ class Bot:
         sess.history.append({"role": "assistant", "content": reply})
         self._trim_history(sess)
         return reply
+
+    # ---------------- 私聊主动消息 ----------------
+    async def compose_proactive(self, uid: int) -> str:
+        """生成一条主动私聊内容。"""
+        key = f"p{uid}"
+        persona = self.persona
+        sys_prompt = persona.get("system_prompt", "")
+        if persona.get("style_hints"):
+            sys_prompt += "\n\n风格要求: " + " ".join(persona["style_hints"])
+
+        mem_ctx = ""
+        mood_note = ""
+        last_msg = ""
+        idle_min = 0
+        if self.memory:
+            mem = self.memory.get(key)
+            mem_ctx = build_memory_prompt(mem) or ""
+            last_msg = getattr(mem, "last_user_msg", "") or ""
+            if mem.last_seen:
+                idle_min = int((time.time() - mem.last_seen) // 60)
+            mood = mem.mood.decayed(time.time())
+            if mood.name and mood.intensity > 0.35:
+                mood_note = (f"你现在的情绪：{mood.name}（{mood.intensity:.0%}）。"
+                             f"这会体现在语气里，别装作没事。")
+
+        hour = int(time.localtime().tm_hour)
+        prompt = proactive.build_proactive_prompt(
+            sys_prompt, idle_min, hour, mem_ctx, last_msg, mood_note)
+
+        # 带上少量对话历史保持连贯
+        sess = self.sessions.get(key)
+        history = []
+        if sess:
+            history = [m for m in sess.history[-4:] if isinstance(m.get("content"), str)]
+
+        messages = [{"role": "system", "content": prompt}]
+        messages += history
+        if not history:
+            messages.append({"role": "user", "content": "（现在没人说话，你自己想找他。）"})
+
+        try:
+            loop = asyncio.get_running_loop()
+            text = await loop.run_in_executor(
+                None, lambda: self.llm.chat(messages, temperature=1.0))
+        except LLMError as exc:
+            log.error("[主动] LLM 失败: %s", exc)
+            return ""
+
+        text = (text or "").strip()
+        # 别把模型写的旁白发出去
+        text = re.sub(r"^(你[:：]\s*)", "", text)
+        text = text.strip("\"\u201c\u201d'")
+        if not text or len(text) > 200:
+            return ""
+        # 不要把"（沉默）"这类空内容发出去
+        if re.fullmatch(r"[（(].{0,8}[)）]", text):
+            return ""
+        return text
 
     def _trim_history(self, sess: Session) -> None:
         cfg = self.cfg
@@ -1009,15 +1210,74 @@ async def amain() -> None:
 
     async def handler(ev: Dict[str, Any]) -> None:
         text = extract_text(ev.get("message"))
-        admin_reply = bot.admin_command(ev, text)
+        is_self = ev.get("user_id") == ev.get("self_id")
+        is_group = ev.get("message_type") == "group"
+
+        # 群消息先入记忆（无论是否触发回复）
+        if not is_self and is_group:
+            bot.record_group_msg(ev)
+
+        # ---- 群总结（任何人可触发，群里要说"总结"）----
+        if not is_self and is_group and text:
+            window = groupmem.parse_summary_request(text)
+            if window is not None:
+                client: OneBotClient = bot.client  # type: ignore[attr-defined]
+                summary = await bot.summarize_group(int(ev.get("group_id") or 0), window)
+                await client.send_group_msg(int(ev.get("group_id") or 0), summary)
+                return
+
+        # ---- 管理指令 ----
+        admin_reply = await admin_command_async(ev, text)
         if admin_reply:
             client: OneBotClient = bot.client  # type: ignore[attr-defined]
             await bot._send(ev, admin_reply)
             return
         await bot.handle(ev)
 
+    async def admin_command_async(ev: Dict[str, Any], text: str) -> Any:
+        """同步管理指令 + 需要 await 的新指令（RSS / 主动消息）。"""
+        client: OneBotClient = bot.client  # type: ignore[attr-defined]
+        base = bot.admin_command(ev, text)
+        if base:
+            return base
+        if ev.get("user_id") not in bot.cfg.admins:
+            return None
+        t = (text or "").strip()
+
+        if re.match(r"^(rss|订阅)\s*(状态|status)?$", t, re.I):
+            return bot.rss.status_text() if bot.rss else "RSS 未启用"
+        if re.match(r"^(rss|订阅)\s*(检查|check|拉取)$", t, re.I):
+            if not bot.rss:
+                return "RSS 未启用"
+            return "检查结果：\n" + await bot.rss.check_all_now(client, push=True)
+        if re.match(r"^(主动|proactive)\s*(状态|status)?$", t, re.I):
+            return bot.proactive.status_text() if bot.proactive else "主动消息未启用"
+        if re.match(r"^(主动|proactive)\s*(开|on|启用)$", t, re.I):
+            if not bot.proactive:
+                bot.cfg.proactive_enabled = True
+                bot.proactive = proactive.ProactiveScheduler(bot, bot.cfg)
+                bot.proactive.start()
+            bot.cfg.proactive_enabled = True
+            return "主动发消息：已开启"
+        if re.match(r"^(主动|proactive)\s*(关|off|关闭)$", t, re.I):
+            if bot.proactive:
+                bot.proactive.stop()
+                bot.proactive = None
+            bot.cfg.proactive_enabled = False
+            return "主动发消息：已关闭"
+        return None
+
     client = OneBotClient(cfg, handler)
     bot.client = client  # type: ignore[attr-defined]
+
+    # ---- 后台任务 ----
+    bg: List[asyncio.Task] = []
+    if bot.rss is not None:
+        bg.append(asyncio.ensure_future(bot.rss.run_forever(client)))
+        log.info("[RSS] 已启动 %d 个订阅源", len(bot.rss.feeds))
+    if bot.proactive is not None:
+        bg.append(bot.proactive.start())
+        log.info("[主动] 私聊主动消息已启动")
 
     stop = asyncio.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -1039,6 +1299,17 @@ async def amain() -> None:
             log.exception("未知错误, %ds 后重连", backoff)
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 30)
+
+    # 退出清理
+    for t in bg:
+        t.cancel()
+    if bot.rss is not None:
+        bot.rss.stop()
+    if bot.proactive is not None:
+        bot.proactive.stop()
+    if bot.group_memory is not None:
+        bot.group_memory.save_all()
+    log.info("已退出")
 
 
 def main() -> None:

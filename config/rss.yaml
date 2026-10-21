@@ -1,0 +1,41 @@
+# RSS / Atom 订阅配置
+#
+# 每个源：
+#   name      显示名（推送消息里会出现）
+#   url       订阅地址（RSS 2.0 / Atom / RDF 都支持）
+#   interval  检查间隔，秒（最小 120，默认 900 = 15 分钟）
+#   max_items 一次最多推几条（默认 3，防止刷屏）
+#   enabled   是否启用
+#   to        推送到哪里，可以多个
+#             - "g123456789"   群号
+#             - "p987654321"   私聊 QQ
+#             - {type: group, id: 123456789}
+#   template  可选，自定义推送格式，支持 {feed} {title} {link} {summary}
+#
+# 首次订阅会先把现有的条目录成基线，不会把历史文章全推一遍。
+
+feeds:
+  # ---------- 示例（把 to 改成你的群号/QQ 就能用）----------
+  - name: 少数派
+    url: https://sspai.com/feed
+    interval: 1800
+    max_items: 3
+    enabled: false
+    to: []
+
+  - name: 阮一峰的网络日志
+    url: https://www.ruanyifeng.com/blog/atom.xml
+    interval: 3600
+    max_items: 2
+    enabled: false
+    to: []
+
+  - name: Hacker News 最佳
+    url: https://hnrss.org/best
+    interval: 1800
+    max_items: 3
+    enabled: false
+    to: []
+
+# 全局开关（也可以在 config/bot.yaml 的 rss_enabled 控制）
+enabled: true

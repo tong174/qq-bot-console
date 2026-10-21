@@ -33,3 +33,14 @@ behavior:
   vision_enabled: true
   web_enabled: true
   web_max_results: 4
+  group_memory_enabled: true
+  group_memory_dir: memory/groups
+  group_memory_keep: 4000
+  group_summary_window: 3600
+  rss_enabled: true
+  rss_file: rss.yaml
+  proactive_enabled: true
+  proactive_min_gap_min: 90
+  proactive_max_per_day: 4
+  proactive_wake_from: 9
+  proactive_wake_to: 23

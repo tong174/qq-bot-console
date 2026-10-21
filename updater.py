@@ -21,7 +21,7 @@ from typing import Any, Dict, Optional
 from urllib.request import ProxyHandler, build_opener
 
 # 当前版本
-CURRENT_VERSION = "1.3.0"
+CURRENT_VERSION = "1.4.0"
 
 # 更新源 (可换成自己的仓库)
 REPO = "tong174/qq-bot-console"
